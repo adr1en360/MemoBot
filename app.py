@@ -1,124 +1,102 @@
 import os
 import sqlite3
 from flask import Flask, request
-import telegram
-from telegram.ext import CommandHandler, Dispatcher, MessageHandler, Filters
+from telegram import Update, Bot
+from telegram.ext import Dispatcher, CommandHandler, CallbackContext
+from dotenv import load_dotenv
 
-TOKEN = os.environ.get("BOT_TOKEN")
-bot = telegram.Bot(token=TOKEN)
+# Load environment variables
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
+bot = Bot(token=TOKEN)
 
+# Initialize Flask app
 app = Flask(__name__)
 
-# === SQLite setup ===
+# SQLite database setup
 conn = sqlite3.connect("notes.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS notes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         tag TEXT,
-        note TEXT
+        content TEXT
     )
 ''')
 conn.commit()
 
-# === Command handlers ===
-
-def start(update, context):
-    update.message.reply_text("👋 Welcome to Memo_360Bot!\nUse /help to see what I can do.")
-
-def help_command(update, context):
-    help_text = (
-        "📌 *Memo_360Bot Commands:*\n"
-        "/save <tag> <note> – Save a note under a tag\n"
-        "/view – View all your notes\n"
-        "/search <keyword> – Search notes\n"
-        "/delete <tag> – Delete all notes with a specific tag\n"
-        "/clear – Delete all your notes\n"
-        "/help – Show this help message"
+# Bot command: /start
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        "👋 Welcome to *Memo_360Bot*!\n\n"
+        "You can use the following commands:\n"
+        "/save <tag> <note> - Save a note\n"
+        "/view - View all saved notes\n"
+        "/search <keyword> - Search through notes\n"
+        "/recall - Recall quick saved notes",
+        parse_mode="Markdown"
     )
-    update.message.reply_text(help_text, parse_mode=telegram.ParseMode.MARKDOWN)
 
-def save(update, context):
-    user_id = update.effective_user.id
-    args = context.args
-    if len(args) < 2:
-        update.message.reply_text("❗ Format: /save <tag> <note>")
-        return
-    tag = args[0]
-    note = " ".join(args[1:])
-    cursor.execute("INSERT INTO notes (user_id, tag, note) VALUES (?, ?, ?)", (user_id, tag, note))
-    conn.commit()
-    update.message.reply_text(f"✅ Saved under *{tag}*", parse_mode=telegram.ParseMode.MARKDOWN)
+# Bot command: /save <tag> <note>
+def save(update: Update, context: CallbackContext):
+    try:
+        tag = context.args[0]
+        content = ' '.join(context.args[1:])
+        cursor.execute("INSERT INTO notes (user_id, tag, content) VALUES (?, ?, ?)",
+                       (update.effective_user.id, tag, content))
+        conn.commit()
+        update.message.reply_text(f"✅ Note saved under tag: `{tag}`", parse_mode="Markdown")
+    except IndexError:
+        update.message.reply_text("❗Usage: /save <tag> <note>")
 
-def view(update, context):
+# Bot command: /view
+def view(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
-    cursor.execute("SELECT tag, note FROM notes WHERE user_id=?", (user_id,))
-    rows = cursor.fetchall()
-    if not rows:
-        update.message.reply_text("📭 You have no saved notes.")
-        return
-    message = "🗂 *Your Notes:*\n"
-    for tag, note in rows:
-        message += f"🔖 *{tag}*: {note}\n"
-    update.message.reply_text(message, parse_mode=telegram.ParseMode.MARKDOWN)
+    cursor.execute("SELECT tag, content FROM notes WHERE user_id=?", (user_id,))
+    notes = cursor.fetchall()
+    if not notes:
+        update.message.reply_text("📭 No saved notes.")
+    else:
+        response = "\n".join([f"📌 *{tag}*: {content}" for tag, content in notes])
+        update.message.reply_text(response, parse_mode="Markdown")
 
-def search(update, context):
+# Bot command: /search <keyword>
+def search(update: Update, context: CallbackContext):
+    keyword = ' '.join(context.args)
     user_id = update.effective_user.id
-    keyword = " ".join(context.args)
-    if not keyword:
-        update.message.reply_text("❗ Usage: /search <keyword>")
-        return
-    cursor.execute("SELECT tag, note FROM notes WHERE user_id=? AND note LIKE ?", (user_id, f"%{keyword}%"))
-    results = cursor.fetchall()
-    if not results:
+    cursor.execute("SELECT tag, content FROM notes WHERE user_id=? AND content LIKE ?", 
+                   (user_id, f"%{keyword}%"))
+    notes = cursor.fetchall()
+    if not notes:
         update.message.reply_text("🔍 No matching notes found.")
-        return
-    message = "🔎 *Search Results:*\n"
-    for tag, note in results:
-        message += f"🔖 *{tag}*: {note}\n"
-    update.message.reply_text(message, parse_mode=telegram.ParseMode.MARKDOWN)
+    else:
+        response = "\n".join([f"🔖 *{tag}*: {content}" for tag, content in notes])
+        update.message.reply_text(response, parse_mode="Markdown")
 
-def delete(update, context):
+# Bot command: /recall (quick saved notes from file)
+def recall_notes(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
-    if not context.args:
-        update.message.reply_text("❗ Usage: /delete <tag>")
-        return
-    tag = context.args[0]
-    cursor.execute("DELETE FROM notes WHERE user_id=? AND tag=?", (user_id, tag))
-    conn.commit()
-    update.message.reply_text(f"🗑 Deleted all notes under *{tag}*", parse_mode=telegram.ParseMode.MARKDOWN)
+    try:
+        with open(f"notes_{user_id}.txt", "r") as f:
+            notes = f.read()
+        update.message.reply_text("📂 Your notes:\n" + notes)
+    except FileNotFoundError:
+        update.message.reply_text("📭 You don't have any quick-saved notes yet.")
 
-def clear(update, context):
-    user_id = update.effective_user.id
-    cursor.execute("DELETE FROM notes WHERE user_id=?", (user_id,))
-    conn.commit()
-    update.message.reply_text("🧹 All your notes have been deleted.")
-
-def unknown(update, context):
-    update.message.reply_text("❓ I didn't recognize that command. Use /help to see available commands.")
-
-# === Flask Webhook route ===
-
-@app.route(f"/{TOKEN}", methods=["POST"])
+# Flask route to handle Telegram webhook
+@app.route('/webhook', methods=['POST'])
 def webhook():
-    update = telegram.Update.de_json(request.get_json(force=True), bot)
+    update = Update.de_json(request.get_json(force=True), bot)
     dispatcher.process_update(update)
     return "ok"
 
-@app.route("/")
-def home():
-    return "Memo_360Bot is running!"
-
-# === Dispatcher setup ===
-
-dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
+# Dispatcher and command registration
+dispatcher = Dispatcher(bot, None, use_context=True)
 dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("help", help_command))
 dispatcher.add_handler(CommandHandler("save", save))
 dispatcher.add_handler(CommandHandler("view", view))
 dispatcher.add_handler(CommandHandler("search", search))
-dispatcher.add_handler(CommandHandler("delete", delete))
-dispatcher.add_handler(CommandHandler("clear", clear))
-dispatcher.add_handler(MessageHandler(Filters.command, unknown))  # catch unknown commands
+dispatcher.add_handler(CommandHandler("recall", recall_notes))
 
+if __name__ == "__main__":
+    app.run(debug=True)
