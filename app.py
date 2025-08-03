@@ -50,6 +50,29 @@ def search(update, context):
         response = "\n".join([f"[{tag}] {content}" for tag, content in notes])
         update.message.reply_text(response)
 
+def save_note(update, context):
+    if not context.args:
+        update.message.reply_text("❗Usage: /save your message here")
+        return
+    note = ' '.join(context.args)
+    user_id = update.effective_user.id
+
+    # You can save this to a database later
+    with open(f"notes_{user_id}.txt", "a") as f:
+        f.write(note + "\n")
+
+    update.message.reply_text("📝 Saved!")
+
+def recall_notes(update, context):
+    user_id = update.effective_user.id
+    try:
+        with open(f"notes_{user_id}.txt", "r") as f:
+            notes = f.read()
+        update.message.reply_text("🗃️ Your notes:\n" + notes)
+    except FileNotFoundError:
+        update.message.reply_text("📭 You don't have any saved notes yet.")
+
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
@@ -61,6 +84,11 @@ dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("save", save))
 dispatcher.add_handler(CommandHandler("view", view))
 dispatcher.add_handler(CommandHandler("search", search))
+dispatcher.add_handler(CommandHandler("save", save_note))
+dispatcher.add_handler(CommandHandler("recall", recall_notes))
+
+
+
 
 if __name__ == "__main__":
     app.run(debug=True)
