@@ -1,208 +1,123 @@
 import os
 import sqlite3
-from flask import Flask, request, send_file
-from telegram import (
-    Bot, Update, InlineKeyboardButton,
-    InlineKeyboardMarkup, InputFile
-)
-from telegram.ext import (
-    Dispatcher, CommandHandler, MessageHandler,
-    Filters, CallbackContext, CallbackQueryHandler
-)
+from flask import Flask, request
+from telegram import Bot, Update, InputFile
+from telegram.ext import Dispatcher, CommandHandler, CallbackContext
 from io import BytesIO
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-
-app = Flask(__name__)
 bot = Bot(token=TOKEN)
 
-# Set up dispatcher
-dispatcher = Dispatcher(bot, None, use_context=True)
+# Flask setup
+app = Flask(__name__)
 
-# Ensure the database exists
-def init_db():
-    conn = sqlite3.connect("notes.db")
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            tag TEXT,
-            note TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+# SQLite setup
+conn = sqlite3.connect("notes.db", check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS notes (
+        user_id INTEGER,
+        tag TEXT,
+        note TEXT
+    )
+''')
+conn.commit()
 
-init_db()
-
-# --- Command Handlers ---
-
+# Commands
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
-        "📝 *Welcome to MemoBot!*\n\n"
-        "You can save, view, search, and export notes right from Telegram.\n\n"
-        "Available commands:\n"
-        "`/save <tag> <note>` - Save a note\n"
-        "`/view <tag>` - View notes\n"
-        "`/search <keyword>` - Search your notes\n"
-        "`/delete <tag>` - Delete a note\n"
-        "`/export` - Export all notes\n",
-        parse_mode='Markdown'
+        "👋 Welcome to MemoBot!\n\n"
+        "Use the following commands:\n"
+        "/save <tag> <note>\n"
+        "/view - View all notes\n"
+        "/search <keyword>\n"
+        "/delete <tag>\n"
+        "/export - Export all notes"
     )
 
 def save(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    args = context.args
-
-    if len(args) < 2:
-        update.message.reply_text("❌ Use format: `/save tag note`", parse_mode='Markdown')
-        return
-
-    tag = args[0]
-    note = ' '.join(args[1:])
-
-    conn = sqlite3.connect("notes.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO notes (user_id, tag, note) VALUES (?, ?, ?)", (user_id, tag, note))
-    conn.commit()
-    conn.close()
-
-    update.message.reply_text("✅ Note saved under *{}*.".format(tag), parse_mode='Markdown')
+    try:
+        tag = context.args[0]
+        note = ' '.join(context.args[1:])
+        cursor.execute("INSERT INTO notes (user_id, tag, note) VALUES (?, ?, ?)",
+                       (update.effective_user.id, tag, note))
+        conn.commit()
+        update.message.reply_text(f"✅ Saved under `{tag}`", parse_mode='Markdown')
+    except IndexError:
+        update.message.reply_text("❗Usage: /save <tag> <note>")
 
 def view(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    args = context.args
-
-    if len(args) != 1:
-        update.message.reply_text("❌ Use format: `/view tag`", parse_mode='Markdown')
-        return
-
-    tag = args[0]
-
-    conn = sqlite3.connect("notes.db")
-    c = conn.cursor()
-    c.execute("SELECT note FROM notes WHERE user_id = ? AND tag = ?", (user_id, tag))
-    results = c.fetchall()
-    conn.close()
-
-    if results:
-        text = f"📒 *Notes under `{tag}`:*\n\n"
-        for i, (note,) in enumerate(results, 1):
-            text += f"{i}. {note}\n"
-        update.message.reply_text(text, parse_mode='Markdown')
+    user_id = update.effective_user.id
+    cursor.execute("SELECT tag, note FROM notes WHERE user_id=?", (user_id,))
+    notes = cursor.fetchall()
+    if not notes:
+        update.message.reply_text("📭 No saved notes.")
     else:
-        update.message.reply_text("⚠️ No notes found under this tag.")
+        response = "\n".join([f"📌 {tag}: {note}" for tag, note in notes])
+        update.message.reply_text(response)
 
 def search(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    args = context.args
-
-    if len(args) < 1:
-        update.message.reply_text("❌ Use format: `/search keyword`", parse_mode='Markdown')
-        return
-
-    keyword = ' '.join(args)
-
-    conn = sqlite3.connect("notes.db")
-    c = conn.cursor()
-    c.execute("SELECT tag, note FROM notes WHERE user_id = ? AND note LIKE ?", (user_id, f"%{keyword}%"))
-    results = c.fetchall()
-    conn.close()
-
+    keyword = ' '.join(context.args)
+    user_id = update.effective_user.id
+    cursor.execute("SELECT tag, note FROM notes WHERE user_id=? AND note LIKE ?", 
+                   (user_id, f"%{keyword}%"))
+    results = cursor.fetchall()
     if results:
-        text = f"🔍 *Search results for `{keyword}`:*\n\n"
-        for tag, note in results:
-            text += f"- ({tag}) {note}\n"
-        update.message.reply_text(text, parse_mode='Markdown')
+        response = "\n".join([f"🔍 {tag}: {note}" for tag, note in results])
+        update.message.reply_text(response)
     else:
-        update.message.reply_text("⚠️ No matches found.")
+        update.message.reply_text("🔍 No matching notes found.")
 
 def delete(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    args = context.args
-
-    if len(args) != 1:
-        update.message.reply_text("❌ Use format: `/delete tag`", parse_mode='Markdown')
+    user_id = update.effective_user.id
+    if not context.args:
+        update.message.reply_text("❗Usage: /delete <tag>")
         return
-
-    tag = args[0]
-
-    conn = sqlite3.connect("notes.db")
-    c = conn.cursor()
-    c.execute("DELETE FROM notes WHERE user_id = ? AND tag = ?", (user_id, tag))
-    deleted = c.rowcount
+    tag = context.args[0]
+    cursor.execute("DELETE FROM notes WHERE user_id=? AND tag=?", (user_id, tag))
+    deleted = cursor.rowcount
     conn.commit()
-    conn.close()
-
     if deleted:
-        update.message.reply_text(f"🗑️ Deleted {deleted} note(s) under `{tag}`.", parse_mode='Markdown')
+        update.message.reply_text(f"🗑️ Deleted {deleted} note(s) under `{tag}`", parse_mode='Markdown')
     else:
-        update.message.reply_text("⚠️ No notes found to delete.")
+        update.message.reply_text("⚠️ No notes found for that tag.")
 
 def export_notes(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-
-    conn = sqlite3.connect("notes.db")
-    c = conn.cursor()
-    c.execute("SELECT tag, note FROM notes WHERE user_id = ?", (user_id,))
-    notes = c.fetchall()
-    conn.close()
-
+    user_id = update.effective_user.id
+    cursor.execute("SELECT tag, note FROM notes WHERE user_id=?", (user_id,))
+    notes = cursor.fetchall()
     if not notes:
-        update.message.reply_text("⚠️ You have no saved notes.")
+        update.message.reply_text("📭 No notes to export.")
         return
 
-    output = ""
-    tags = {}
+    content = ""
     for tag, note in notes:
-        tags.setdefault(tag, []).append(note)
-
-    for tag, entries in tags.items():
-        output += f"Tag: {tag}\n"
-        for note in entries:
-            output += f"- {note}\n"
-        output += "\n"
+        content += f"[{tag}] {note}\n"
 
     file = BytesIO()
-    file.write(output.encode("utf-8"))
+    file.write(content.encode('utf-8'))
     file.seek(0)
     update.message.reply_document(InputFile(file, filename="your_notes.txt"))
 
-def inline_buttons(update: Update, context: CallbackContext):
-    keyboard = [
-        [InlineKeyboardButton("💾 Save", switch_inline_query_current_chat="/save ")],
-        [InlineKeyboardButton("🔍 Search", switch_inline_query_current_chat="/search ")],
-        [InlineKeyboardButton("📂 View", switch_inline_query_current_chat="/view ")],
-        [InlineKeyboardButton("🗑 Delete", switch_inline_query_current_chat="/delete ")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("Use buttons to send commands:", reply_markup=reply_markup)
+# Webhook route
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "ok"
 
-# --- Dispatcher Setup ---
+# Dispatcher
+dispatcher = Dispatcher(bot, None, use_context=True)
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("save", save))
 dispatcher.add_handler(CommandHandler("view", view))
 dispatcher.add_handler(CommandHandler("search", search))
 dispatcher.add_handler(CommandHandler("delete", delete))
 dispatcher.add_handler(CommandHandler("export", export_notes))
-dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex(r'^\s*/?$'), inline_buttons))
 
-# --- Webhook Route ---
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return "ok"
-
-@app.route("/", methods=["GET"])
-def index():
-    return "MemoBot is running!"
-
-# --- Start Flask App ---
+# Run server
 if __name__ == "__main__":
-    PORT = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=PORT)
+    app.run(debug=True)
